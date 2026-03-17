@@ -3,24 +3,24 @@ import requests
 import pandas as pd
 import numpy as np
 
-st.title("⚽ FINAL Football Betting AI")
+st.set_page_config(layout="wide")
+st.title("⚽ FINAL + PROFIT Football AI")
 
+# --- INPUTOK ---
 API_KEY = st.text_input("62f668f1e4a69303cf9b75e0f3cf3452")
+bankroll = st.number_input("Bankroll (€)", value=1000)
+mode = st.selectbox("Staking mód", ["SAFE", "SMART"])
 
-# Telegram
-TG_TOKEN = st.text_input("Telegram token (optional)")
-CHAT_ID = st.text_input("Chat ID (optional)")
-
-# Ligák
+# --- LIGÁK ---
 leagues = {
-"Premier League":"soccer_epl",
-"La Liga":"soccer_spain_la_liga",
-"Bundesliga":"soccer_germany_bundesliga",
-"Serie A":"soccer_italy_serie_a",
-"Ligue 1":"soccer_france_ligue_one"
+    "Premier League":"soccer_epl",
+    "La Liga":"soccer_spain_la_liga",
+    "Bundesliga":"soccer_germany_bundesliga",
+    "Serie A":"soccer_italy_serie_a",
+    "Ligue 1":"soccer_france_ligue_one"
 }
 
-# --- ELO ALAP (egyszerűsített) ---
+# --- ELO ---
 elo_ratings = {}
 
 def get_elo(team):
@@ -40,9 +40,12 @@ def monte_carlo(home_xg, away_xg, sims=3000):
         hg = np.random.poisson(home_xg)
         ag = np.random.poisson(away_xg)
 
-        if hg > ag: hw += 1
-        elif ag > hg: aw += 1
-        else: dr += 1
+        if hg > ag:
+            hw += 1
+        elif ag > hg:
+            aw += 1
+        else:
+            dr += 1
 
         if hg + ag > 2:
             ov += 1
@@ -51,13 +54,6 @@ def monte_carlo(home_xg, away_xg, sims=3000):
 
 def implied(odds):
     return 1 / odds
-
-def send_tg(msg):
-    if TG_TOKEN and CHAT_ID:
-        requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg}
-        )
 
 # --- MAIN ---
 if API_KEY:
@@ -115,6 +111,14 @@ if API_KEY:
                 home_val = p_home - implied(home_odds)
                 away_val = p_away - implied(away_odds)
 
+                # --- STAKE ---
+                edge = max(home_val, away_val)
+
+                if mode == "SAFE":
+                    stake = bankroll * 0.02
+                else:
+                    stake = bankroll * (edge * 0.5)
+
                 tip = "HOME" if home_val > away_val else "AWAY"
 
                 row = {
@@ -127,28 +131,40 @@ if API_KEY:
                     "Over 2.5 %": round(p_over,2),
                     "Home value": round(home_val,3),
                     "Away value": round(away_val,3),
+                    "Stake (€)": round(stake,2),
                     "🔥 Tipp": tip
                 }
 
                 rows.append(row)
-
-                if home_val > 0.06 or away_val > 0.06:
-                    send_tg(f"🔥 VALUE BET\n{row}")
 
             except:
                 pass
 
     df = pd.DataFrame(rows)
 
-    st.write("Meccsek:", len(df))
+    st.write("Összes meccs:", len(df))
 
-    value_df = df[
-        (df["Home value"] > 0.04) |
-        (df["Away value"] > 0.04)
+    # --- PROFIT FILTER ---
+    filtered_df = df[
+        (
+            ((df["Home value"] > 0.05) & (df["Home %"] > 0.55)) |
+            ((df["Away value"] > 0.05) & (df["Away %"] > 0.55))
+        )
+        &
+        (
+            (df["Home odds"].between(1.7,3.5)) |
+            (df["Away odds"].between(1.7,3.5))
+        )
     ]
 
-    st.subheader("🔥 VALUE BETEK")
-    st.dataframe(value_df, use_container_width=True)
+    # --- TOP 5 ---
+    final_df = filtered_df.sort_values(
+        by=["Home value","Away value"],
+        ascending=False
+    ).head(5)
 
-    st.subheader("Összes meccs")
+    st.subheader("💰 NAPI TOP TIPPEK")
+    st.dataframe(final_df, use_container_width=True)
+
+    st.subheader("📊 ÖSSZES MECCS")
     st.dataframe(df, use_container_width=True)
