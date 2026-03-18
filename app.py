@@ -1,170 +1,206 @@
 import streamlit as st
-import requests
 import pandas as pd
 import numpy as np
+from scipy.stats import poisson
 
 st.set_page_config(layout="wide")
-st.title("⚽ FINAL + PROFIT Football AI")
+st.title("🔥 ELITE AI BETTING SYSTEM")
 
-# --- INPUTOK ---
-API_KEY = st.text_input("62f668f1e4a69303cf9b75e0f3cf3452")
-bankroll = st.number_input("Bankroll (€)", value=1000)
-mode = st.selectbox("Staking mód", ["SAFE", "SMART"])
+# ------------------------
+# SESSION
+# ------------------------
+if "bets" not in st.session_state:
+    st.session_state.bets = []
 
-# --- LIGÁK ---
-leagues = {
-    "Premier League":"soccer_epl",
-    "La Liga":"soccer_spain_la_liga",
-    "Bundesliga":"soccer_germany_bundesliga",
-    "Serie A":"soccer_italy_serie_a",
-    "Ligue 1":"soccer_france_ligue_one"
-}
+# ------------------------
+# DATA (több liga)
+# ------------------------
+urls = [
+    "https://www.football-data.co.uk/mmz4281/2324/E0.csv",
+    "https://www.football-data.co.uk/mmz4281/2324/D1.csv",
+    "https://www.football-data.co.uk/mmz4281/2324/I1.csv"
+]
 
-# --- ELO ---
-elo_ratings = {}
+dfs = []
+for url in urls:
+    try:
+        d = pd.read_csv(url)
+        dfs.append(d)
+    except:
+        pass
 
-def get_elo(team):
-    if team not in elo_ratings:
-        elo_ratings[team] = 1500
-    return elo_ratings[team]
+df = pd.concat(dfs)
 
-def expected_score(a, b):
-    return 1 / (1 + 10 ** ((b - a) / 400))
+df = df.dropna(subset=["FTHG","FTAG","HomeTeam","AwayTeam","B365H","B365D","B365A"])
 
-# --- MONTE CARLO ---
-def monte_carlo(home_xg, away_xg, sims=3000):
+# ------------------------
+# ALAP ÁTLAGOK
+# ------------------------
+avg_home_goals = df["FTHG"].mean()
+avg_away_goals = df["FTAG"].mean()
 
-    hw = aw = dr = ov = 0
+# ------------------------
+# FORMA (last 5)
+# ------------------------
+def get_form(team, df):
 
-    for _ in range(sims):
-        hg = np.random.poisson(home_xg)
-        ag = np.random.poisson(away_xg)
+    matches = df[(df["HomeTeam"]==team) | (df["AwayTeam"]==team)].tail(5)
 
-        if hg > ag:
-            hw += 1
-        elif ag > hg:
-            aw += 1
+    goals_for = 0
+    goals_against = 0
+
+    for _, m in matches.iterrows():
+        if m["HomeTeam"] == team:
+            goals_for += m["FTHG"]
+            goals_against += m["FTAG"]
         else:
-            dr += 1
+            goals_for += m["FTAG"]
+            goals_against += m["FTHG"]
 
-        if hg + ag > 2:
-            ov += 1
+    if len(matches) == 0:
+        return 1,1
 
-    return hw/sims, dr/sims, aw/sims, ov/sims
+    return goals_for/len(matches), goals_against/len(matches)
 
-def implied(odds):
-    return 1 / odds
+# ------------------------
+# CSAPAT ERŐSSÉG
+# ------------------------
+teams = pd.concat([df["HomeTeam"], df["AwayTeam"]]).unique()
 
-# --- MAIN ---
-if API_KEY:
+attack = {}
+defense = {}
 
-    rows = []
+for team in teams:
 
-    for name, code in leagues.items():
+    home = df[df["HomeTeam"]==team]
+    away = df[df["AwayTeam"]==team]
 
-        url = f"https://api.the-odds-api.com/v4/sports/{code}/odds"
+    att = (home["FTHG"].mean() + away["FTAG"].mean()) / 2
+    deff = (home["FTAG"].mean() + away["FTHG"].mean()) / 2
 
-        params = {
-            "apiKey": API_KEY,
-            "regions": "eu",
-            "markets": "h2h,totals"
-        }
+    form_att, form_def = get_form(team, df)
 
-        res = requests.get(url, params=params)
+    # ELITE: kombinált erő
+    attack[team] = (att * 0.7 + form_att * 0.3) / avg_home_goals
+    defense[team] = (deff * 0.7 + form_def * 0.3) / avg_away_goals
 
-        if res.status_code != 200:
-            st.error(f"Hiba: {name}")
-            continue
+# ------------------------
+# PREDIKCIÓ
+# ------------------------
+def predict(home, away):
 
-        games = res.json()
+    home_xg = attack[home] * defense[away] * avg_home_goals
+    away_xg = attack[away] * defense[home] * avg_away_goals
 
-        for g in games:
+    max_goals = 6
 
-            try:
-                home = g["home_team"]
-                away = g["away_team"]
+    home_win = 0
+    draw = 0
+    away_win = 0
 
-                markets = g["bookmakers"][0]["markets"]
+    for i in range(max_goals):
+        for j in range(max_goals):
 
-                h2h = [m for m in markets if m["key"]=="h2h"][0]["outcomes"]
+            p = poisson.pmf(i, home_xg) * poisson.pmf(j, away_xg)
 
-                home_odds = h2h[0]["price"]
-                away_odds = h2h[1]["price"]
+            if i > j:
+                home_win += p
+            elif i == j:
+                draw += p
+            else:
+                away_win += p
 
-                if home_odds < 1.56 and away_odds < 1.56:
-                    continue
+    return home_win, draw, away_win
 
-                # --- ELO ---
-                home_elo = get_elo(home)
-                away_elo = get_elo(away)
+# ------------------------
+# MECCSEK (utolsó 20)
+# ------------------------
+matches = df.tail(20)
 
-                elo_prob = expected_score(home_elo, away_elo)
+rows = []
 
-                # --- xG becslés ---
-                home_xg = 1.2 + (elo_prob * 1.2)
-                away_xg = 1.2 + ((1 - elo_prob) * 1.2)
+for _, r in matches.iterrows():
 
-                # --- MONTE CARLO ---
-                p_home, p_draw, p_away, p_over = monte_carlo(home_xg, away_xg)
+    home = r["HomeTeam"]
+    away = r["AwayTeam"]
 
-                # --- VALUE ---
-                home_val = p_home - implied(home_odds)
-                away_val = p_away - implied(away_odds)
+    hp, dp, ap = predict(home, away)
 
-                # --- STAKE ---
-                edge = max(home_val, away_val)
+    odds_h = r["B365H"]
+    odds_a = r["B365A"]
 
-                if mode == "SAFE":
-                    stake = bankroll * 0.02
-                else:
-                    stake = bankroll * (edge * 0.5)
+    value_h = hp * odds_h - 1
+    value_a = ap * odds_a - 1
 
-                tip = "HOME" if home_val > away_val else "AWAY"
+    rows.append({
+        "Match": f"{home} vs {away}",
+        "Home %": hp,
+        "Away %": ap,
+        "Home odds": odds_h,
+        "Away odds": odds_a,
+        "Home value": value_h,
+        "Away value": value_a
+    })
 
-                row = {
-                    "Liga": name,
-                    "Meccs": f"{home} vs {away}",
-                    "Home odds": home_odds,
-                    "Away odds": away_odds,
-                    "Home %": round(p_home,2),
-                    "Away %": round(p_away,2),
-                    "Over 2.5 %": round(p_over,2),
-                    "Home value": round(home_val,3),
-                    "Away value": round(away_val,3),
-                    "Stake (€)": round(stake,2),
-                    "🔥 Tipp": tip
-                }
+df_pred = pd.DataFrame(rows)
 
-                rows.append(row)
+# ------------------------
+# FILTER (ELITE)
+# ------------------------
+filtered = df_pred[
+    (
+        (df_pred["Home value"] > 0.07) |
+        (df_pred["Away value"] > 0.07)
+    )
+]
 
-            except:
-                pass
+st.subheader("🔥 ELITE TIPPEK")
 
-    df = pd.DataFrame(rows)
+if filtered.empty:
+    st.warning("Nincs találat")
+else:
+    for i, row in filtered.iterrows():
 
-    st.write("Összes meccs:", len(df))
+        st.write(row["Match"])
 
-    # --- PROFIT FILTER ---
-    filtered_df = df[
-        (
-            ((df["Home value"] > 0.05) & (df["Home %"] > 0.55)) |
-            ((df["Away value"] > 0.05) & (df["Away %"] > 0.55))
-        )
-        &
-        (
-            (df["Home odds"].between(1.7,3.5)) |
-            (df["Away odds"].between(1.7,3.5))
-        )
-    ]
+        st.write(f"Home%: {round(row['Home %'],2)} | Away%: {round(row['Away %'],2)}")
 
-    # --- TOP 5 ---
-    final_df = filtered_df.sort_values(
-        by=["Home value","Away value"],
-        ascending=False
-    ).head(5)
+        st.write(f"Value: H {round(row['Home value'],2)} | A {round(row['Away value'],2)}")
 
-    st.subheader("💰 NAPI TOP TIPPEK")
-    st.dataframe(final_df, use_container_width=True)
+        stake = 1000 * max(row["Home value"], row["Away value"])
 
-    st.subheader("📊 ÖSSZES MECCS")
-    st.dataframe(df, use_container_width=True)
+        st.write(f"Stake: {round(stake,2)}")
+
+        if st.button(f"Fogadás {row['Match']}", key=f"b{i}"):
+
+            side = "HOME" if row["Home value"] > row["Away value"] else "AWAY"
+            odds = row["Home odds"] if side=="HOME" else row["Away odds"]
+
+            st.session_state.bets.append({
+                "match": row["Match"],
+                "side": side,
+                "odds": odds,
+                "stake": stake
+            })
+
+# ------------------------
+# CLV
+# ------------------------
+st.subheader("📉 CLV")
+
+for i, bet in enumerate(st.session_state.bets):
+
+    st.write(f"{bet['match']} @ {bet['odds']}")
+
+    closing = st.number_input(f"Closing odds {i}", key=f"clv_{i}")
+
+    if closing > 0:
+
+        clv = bet["odds"] - closing
+
+        st.write(f"CLV: {round(clv,2)}")
+
+        if clv > 0:
+            st.success("✅ GOOD")
+        else:
+            st.error("❌ BAD")
