@@ -1,200 +1,157 @@
 import streamlit as st
-import pandas as pd
 import requests
-from rapidfuzz import process, fuzz
+import pandas as pd
+from datetime import datetime
+import os
 
-st.title("🔥 BETTING SYSTEM (REAL EDGE)")
+st.title("📊 ODDS MOVEMENT TRACKER")
+
+# ======================
+# API KEY
+# ======================
+ODDS_API_KEY = "62f668f1e4a69303cf9b75e0f3cf3452"
 
 # ======================
 # SETTINGS
 # ======================
-MIN_EDGE = 0.02
-MIN_VALUE = 0.03
+FILE = "odds_history.csv"
+
+SPORT = "soccer_epl,soccer_germany_bundesliga,soccer_spain_la_liga,soccer_italy_serie_a" # ide később jöhet több liga
 
 # ======================
-# API KEYS
+# GET ODDS
 # ======================
-FOOTBALL_API_KEY = "87d5fc28e1e84206b1e48312563372b7"
-ODDS_API_KEY = "62f668f1e4a69303cf9b75e0f3cf3452"
-
-# ======================
-# NORMALIZE
-# ======================
-def normalize(name):
-    name = name.lower()
-    for r in ["fc", "cf", "club", "sc", "ac"]:
-        name = name.replace(r, "")
-    return name.strip()
-
-# ======================
-# FUZZY MATCH
-# ======================
-def fuzzy_match(team, team_list):
-    match, score, _ = process.extractOne(
-        normalize(team),
-        team_list,
-        scorer=fuzz.token_sort_ratio
-    )
-    return match if score > 70 else None
-
-# ======================
-# LOAD DATA
-# ======================
-@st.cache_data
-def load_data():
-    url = "https://www.football-data.co.uk/mmz4281/2324/E0.csv"
-    return pd.read_csv(url)
-
-df = load_data()
-
-# ======================
-# MODEL
-# ======================
-teams = {}
-
-for _, row in df.iterrows():
-    home = normalize(row["HomeTeam"])
-    away = normalize(row["AwayTeam"])
-
-    if home not in teams:
-        teams[home] = {"g": 0, "n": 0}
-    if away not in teams:
-        teams[away] = {"g": 0, "n": 0}
-
-    teams[home]["g"] += row["FTHG"]
-    teams[home]["n"] += 1
-
-    teams[away]["g"] += row["FTAG"]
-    teams[away]["n"] += 1
-
-team_list = list(teams.keys())
-
-# ======================
-# PREDICT
-# ======================
-def predict(h, a):
-    if h not in teams or a not in teams:
-        return None
-
-    hp = teams[h]["g"] / teams[h]["n"]
-    ap = teams[a]["g"] / teams[a]["n"]
-
-    total = hp + ap
-    return hp / total, ap / total
-
-# ======================
-# LIVE DATA
-# ======================
-def get_matches():
-    try:
-        url = "https://api.football-data.org/v4/matches"
-        headers = {"X-Auth-Token": FOOTBALL_API_KEY}
-        params = {"status": "SCHEDULED"}
-
-        r = requests.get(url, headers=headers, params=params, timeout=5)
-        if r.status_code != 200:
-            return None
-
-        return [
-            {
-                "home": m["homeTeam"]["name"],
-                "away": m["awayTeam"]["name"]
-            }
-            for m in r.json()["matches"][:20]
-        ]
-    except:
-        return None
-
 def get_odds():
-    try:
-        url = "https://api.the-odds-api.com/v4/sports/soccer_epl,soccer_germany_bundesliga,soccer_spain_la_liga,soccer_italy_serie_a/odds/"
-        params = {
-            "apiKey": ODDS_API_KEY,
-            "regions": "eu",
-            "markets": "h2h"
-        }
+    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds/"
+    
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "eu",
+        "markets": "h2h"
+    }
 
-        r = requests.get(url, params=params, timeout=5)
-        if r.status_code != 200:
-            return None
+    r = requests.get(url, params=params)
 
-        return r.json()
-    except:
+    if r.status_code != 200:
+        st.error("❌ Odds API hiba")
         return None
+
+    return r.json()
+
+# ======================
+# SAVE SNAPSHOT
+# ======================
+def save_snapshot(data):
+    rows = []
+
+    for game in data:
+        home = game["home_team"]
+        away = game["away_team"]
+
+        try:
+            outcomes = game["bookmakers"][0]["markets"][0]["outcomes"]
+
+            home_odds = outcomes[0]["price"]
+            away_odds = outcomes[1]["price"]
+
+            rows.append({
+                "time": datetime.now(),
+                "match": f"{home} vs {away}",
+                "home": home,
+                "away": away,
+                "home_odds": home_odds,
+                "away_odds": away_odds
+            })
+        except:
+            continue
+
+    df_new = pd.DataFrame(rows)
+
+    if os.path.exists(FILE):
+        df_old = pd.read_csv(FILE)
+        df = pd.concat([df_old, df_new])
+    else:
+        df = df_new
+
+    df.to_csv(FILE, index=False)
+
+# ======================
+# LOAD HISTORY
+# ======================
+def load_history():
+    if os.path.exists(FILE):
+        return pd.read_csv(FILE)
+    return pd.DataFrame()
+
+# ======================
+# ANALYZE MOVEMENT
+# ======================
+def analyze_movement(df):
+    results = []
+
+    matches = df["match"].unique()
+
+    for match in matches:
+        m = df[df["match"] == match]
+
+        if len(m) < 2:
+            continue
+
+        first = m.iloc[0]
+        last = m.iloc[-1]
+
+        home_move = last["home_odds"] - first["home_odds"]
+        away_move = last["away_odds"] - first["away_odds"]
+
+        results.append({
+            "match": match,
+            "home_start": first["home_odds"],
+            "home_now": last["home_odds"],
+            "home_move": round(home_move, 3),
+
+            "away_start": first["away_odds"],
+            "away_now": last["away_odds"],
+            "away_move": round(away_move, 3)
+        })
+
+    return pd.DataFrame(results)
 
 # ======================
 # RUN
 # ======================
-matches = get_matches()
-odds_data = get_odds()
+data = get_odds()
 
-if not matches or not odds_data:
-    st.error("❌ NINCS LIVE ADAT → ellenőrizd az API kulcsokat")
-    st.stop()
+if data:
+    save_snapshot(data)
+    st.success("📥 Odds snapshot mentve")
 
-st.success("🟢 LIVE EDGE MODE")
+history = load_history()
 
-found_bets = 0
+if not history.empty:
+    movement = analyze_movement(history)
 
-for m in matches:
-    home = m["home"]
-    away = m["away"]
+    st.subheader("📊 ODDS MOVEMENT")
 
-    h_map = fuzzy_match(home, team_list)
-    a_map = fuzzy_match(away, team_list)
+    for _, row in movement.iterrows():
+        st.write(f"➡️ {row['match']}")
 
-    if not h_map or not a_map:
-        continue
+        # HOME
+        if row["home_move"] < 0:
+            st.success(f"HOME ↓ {row['home_start']} → {row['home_now']} (SHARP)")
+        elif row["home_move"] > 0:
+            st.error(f"HOME ↑ {row['home_start']} → {row['home_now']}")
+        else:
+            st.write("HOME → nincs változás")
 
-    probs = predict(h_map, a_map)
-    if not probs:
-        continue
+        # AWAY
+        if row["away_move"] < 0:
+            st.success(f"AWAY ↓ {row['away_start']} → {row['away_now']} (SHARP)")
+        elif row["away_move"] > 0:
+            st.error(f"AWAY ↑ {row['away_start']} → {row['away_now']}")
+        else:
+            st.write("AWAY → nincs változás")
 
-    home_p, away_p = probs
+        st.write("---")
 
-    # ODDS MATCH
-    odds_match = None
-    for o in odds_data:
-        if home.lower() in o["home_team"].lower():
-            odds_match = o
-            break
-
-    if not odds_match:
-        continue
-
-    try:
-        outcomes = odds_match["bookmakers"][0]["markets"][0]["outcomes"]
-        home_odds = outcomes[0]["price"]
-        away_odds = outcomes[1]["price"]
-    except:
-        continue
-
-    # IMPLIED PROB
-    imp_home = 1 / home_odds
-    imp_away = 1 / away_odds
-
-    # EDGE
-    edge_home = home_p - imp_home
-    edge_away = away_p - imp_away
-
-    # VALUE
-    val_home = home_p * home_odds - 1
-    val_away = away_p * away_odds - 1
-
-    # FILTER
-    if val_home > MIN_VALUE and edge_home > MIN_EDGE:
-        found_bets += 1
-
-        st.subheader(f"{home} vs {away}")
-        st.write(f"📊 EDGE: {round(edge_home,3)} | VALUE: {round(val_home,3)}")
-        st.success(f"👉 BET: {home}")
-
-    elif val_away > MIN_VALUE and edge_away > MIN_EDGE:
-        found_bets += 1
-
-        st.subheader(f"{home} vs {away}")
-        st.write(f"📊 EDGE: {round(edge_away,3)} | VALUE: {round(val_away,3)}")
-        st.success(f"👉 BET: {away}")
-
-if found_bets == 0:
-    st.warning("⚠️ NINCS VALUE BET JELENLEG (EZ JÓ!)")
+else:
+    st.warning("Nincs még elég adat (legalább 2 snapshot kell)")
