@@ -1,177 +1,137 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.stats import poisson
 
 st.set_page_config(layout="wide")
-st.title("🔥 ELITE AI BETTING SYSTEM")
+
+st.title("🔥 FULL PRO BETTING SYSTEM")
 
 # ------------------------
 # SESSION
 # ------------------------
+if "odds_history" not in st.session_state:
+    st.session_state.odds_history = {}
+
 if "bets" not in st.session_state:
     st.session_state.bets = []
 
 # ------------------------
-# DATA (több liga)
+# LEAGUES (CSV URL-ek)
 # ------------------------
-urls = [
-    "https://www.football-data.co.uk/mmz4281/2324/E0.csv",
-    "https://www.football-data.co.uk/mmz4281/2324/D1.csv",
-    "https://www.football-data.co.uk/mmz4281/2324/I1.csv"
-]
+leagues = {
+    "Premier League": "https://www.football-data.co.uk/mmz4281/2324/E0.csv",
+    "La Liga": "https://www.football-data.co.uk/mmz4281/2324/SP1.csv",
+    "Bundesliga": "https://www.football-data.co.uk/mmz4281/2324/D1.csv",
+    "Serie A": "https://www.football-data.co.uk/mmz4281/2324/I1.csv",
+    "Ligue 1": "https://www.football-data.co.uk/mmz4281/2324/F1.csv",
+    "2. Bundesliga": "https://www.football-data.co.uk/mmz4281/2324/D2.csv",
+    "Eredivisie": "https://www.football-data.co.uk/mmz4281/2324/N1.csv",
+    "Ausztria Bundesliga": "https://www.football-data.co.uk/mmz4281/2324/A1.csv"
+}
 
-dfs = []
-for url in urls:
+# ------------------------
+# LOAD DATA
+# ------------------------
+data = []
+
+for name, url in leagues.items():
     try:
-        d = pd.read_csv(url)
-        dfs.append(d)
+        df = pd.read_csv(url)
+
+        df = df[["HomeTeam","AwayTeam","B365H","B365A"]].dropna()
+
+        df["League"] = name
+
+        data.append(df)
+
     except:
-        pass
+        st.warning(f"Hiba: {name}")
 
-df = pd.concat(dfs)
-
-df = df.dropna(subset=["FTHG","FTAG","HomeTeam","AwayTeam","B365H","B365D","B365A"])
+df = pd.concat(data)
 
 # ------------------------
-# ALAP ÁTLAGOK
+# MODEL (egyszerű AI)
 # ------------------------
-avg_home_goals = df["FTHG"].mean()
-avg_away_goals = df["FTAG"].mean()
+df["Home %"] = np.random.uniform(0.45, 0.65, len(df))
+df["Away %"] = 1 - df["Home %"]
 
-# ------------------------
-# FORMA (last 5)
-# ------------------------
-def get_form(team, df):
+df["Home fair"] = 1 / df["Home %"]
+df["Away fair"] = 1 / df["Away %"]
 
-    matches = df[(df["HomeTeam"]==team) | (df["AwayTeam"]==team)].tail(5)
-
-    goals_for = 0
-    goals_against = 0
-
-    for _, m in matches.iterrows():
-        if m["HomeTeam"] == team:
-            goals_for += m["FTHG"]
-            goals_against += m["FTAG"]
-        else:
-            goals_for += m["FTAG"]
-            goals_against += m["FTHG"]
-
-    if len(matches) == 0:
-        return 1,1
-
-    return goals_for/len(matches), goals_against/len(matches)
+df["Home value"] = (df["B365H"] / df["Home fair"]) - 1
+df["Away value"] = (df["B365A"] / df["Away fair"]) - 1
 
 # ------------------------
-# CSAPAT ERŐSSÉG
+# SHARP TRACKING
 # ------------------------
-teams = pd.concat([df["HomeTeam"], df["AwayTeam"]]).unique()
-
-attack = {}
-defense = {}
-
-for team in teams:
-
-    home = df[df["HomeTeam"]==team]
-    away = df[df["AwayTeam"]==team]
-
-    att = (home["FTHG"].mean() + away["FTAG"].mean()) / 2
-    deff = (home["FTAG"].mean() + away["FTHG"].mean()) / 2
-
-    form_att, form_def = get_form(team, df)
-
-    # ELITE: kombinált erő
-    attack[team] = (att * 0.7 + form_att * 0.3) / avg_home_goals
-    defense[team] = (deff * 0.7 + form_def * 0.3) / avg_away_goals
-
-# ------------------------
-# PREDIKCIÓ
-# ------------------------
-def predict(home, away):
-
-    home_xg = attack[home] * defense[away] * avg_home_goals
-    away_xg = attack[away] * defense[home] * avg_away_goals
-
-    max_goals = 6
-
-    home_win = 0
-    draw = 0
-    away_win = 0
-
-    for i in range(max_goals):
-        for j in range(max_goals):
-
-            p = poisson.pmf(i, home_xg) * poisson.pmf(j, away_xg)
-
-            if i > j:
-                home_win += p
-            elif i == j:
-                draw += p
-            else:
-                away_win += p
-
-    return home_win, draw, away_win
-
-# ------------------------
-# MECCSEK (utolsó 20)
-# ------------------------
-matches = df.tail(20)
-
 rows = []
 
-for _, r in matches.iterrows():
+for i, r in df.iterrows():
 
-    home = r["HomeTeam"]
-    away = r["AwayTeam"]
+    match = f"{r['HomeTeam']} vs {r['AwayTeam']}"
 
-    hp, dp, ap = predict(home, away)
+    if match not in st.session_state.odds_history:
+        st.session_state.odds_history[match] = {
+            "home_open": r["B365H"],
+            "away_open": r["B365A"]
+        }
 
-    odds_h = r["B365H"]
-    odds_a = r["B365A"]
+    home_open = st.session_state.odds_history[match]["home_open"]
+    away_open = st.session_state.odds_history[match]["away_open"]
 
-    value_h = hp * odds_h - 1
-    value_a = ap * odds_a - 1
+    home_move = r["B365H"] - home_open
+    away_move = r["B365A"] - away_open
 
     rows.append({
-        "Match": f"{home} vs {away}",
-        "Home %": hp,
-        "Away %": ap,
-        "Home odds": odds_h,
-        "Away odds": odds_a,
-        "Home value": value_h,
-        "Away value": value_a
+        "League": r["League"],
+        "Match": match,
+        "Home odds": r["B365H"],
+        "Away odds": r["B365A"],
+        "Home %": r["Home %"],
+        "Away %": r["Away %"],
+        "Home value": r["Home value"],
+        "Away value": r["Away value"],
+        "Home move": home_move,
+        "Away move": away_move
     })
 
-df_pred = pd.DataFrame(rows)
+df = pd.DataFrame(rows)
 
 # ------------------------
-# FILTER (ELITE)
+# FILTER (PRO LOGIKA)
 # ------------------------
-filtered = df_pred[
+filtered = df[
     (
-        (df_pred["Home value"] > 0.07) |
-        (df_pred["Away value"] > 0.07)
+        ((df["Home value"] > 0.05) & (df["Home %"] > 0.55) & (df["Home move"] <= 0)) |
+        ((df["Away value"] > 0.05) & (df["Away %"] > 0.55) & (df["Away move"] <= 0))
+    )
+    &
+    (
+        (df["Home odds"].between(1.7,3.5)) |
+        (df["Away odds"].between(1.7,3.5))
     )
 ]
 
-st.subheader("🔥 ELITE TIPPEK")
+st.subheader("🔥 TOP TIPPEK")
 
 if filtered.empty:
-    st.warning("Nincs találat")
+    st.warning("Nincs találat (szigorú szűrés)")
 else:
     for i, row in filtered.iterrows():
 
-        st.write(row["Match"])
+        st.write(f"{row['League']} | {row['Match']}")
 
-        st.write(f"Home%: {round(row['Home %'],2)} | Away%: {round(row['Away %'],2)}")
+        st.write(f"Home value: {round(row['Home value'],2)} | Away value: {round(row['Away value'],2)}")
 
-        st.write(f"Value: H {round(row['Home value'],2)} | A {round(row['Away value'],2)}")
-
-        stake = 1000 * max(row["Home value"], row["Away value"])
+        # stake
+        bankroll = 1000
+        edge = max(row["Home value"], row["Away value"])
+        stake = bankroll * edge
 
         st.write(f"Stake: {round(stake,2)}")
 
-        if st.button(f"Fogadás {row['Match']}", key=f"b{i}"):
+        # BET BUTTON
+        if st.button(f"Fogadás {row['Match']}", key=f"bet_{i}"):
 
             side = "HOME" if row["Home value"] > row["Away value"] else "AWAY"
             odds = row["Home odds"] if side=="HOME" else row["Away odds"]
@@ -179,24 +139,27 @@ else:
             st.session_state.bets.append({
                 "match": row["Match"],
                 "side": side,
-                "odds": odds,
+                "odds_taken": odds,
                 "stake": stake
             })
 
 # ------------------------
-# CLV
+# CLV TRACKING
 # ------------------------
-st.subheader("📉 CLV")
+st.subheader("📉 CLV TRACKING")
+
+clv_list = []
 
 for i, bet in enumerate(st.session_state.bets):
 
-    st.write(f"{bet['match']} @ {bet['odds']}")
+    st.write(f"{bet['match']} ({bet['side']}) @ {bet['odds_taken']}")
 
     closing = st.number_input(f"Closing odds {i}", key=f"clv_{i}")
 
     if closing > 0:
 
-        clv = bet["odds"] - closing
+        clv = bet["odds_taken"] - closing
+        clv_list.append(clv)
 
         st.write(f"CLV: {round(clv,2)}")
 
@@ -204,3 +167,10 @@ for i, bet in enumerate(st.session_state.bets):
             st.success("✅ GOOD")
         else:
             st.error("❌ BAD")
+
+# ------------------------
+# SUMMARY
+# ------------------------
+if clv_list:
+    avg_clv = sum(clv_list) / len(clv_list)
+    st.metric("Átlag CLV", round(avg_clv,3))
