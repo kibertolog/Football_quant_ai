@@ -107,7 +107,7 @@ def get_matches():
 
 def get_odds():
     try:
-        url = "https://api.the-odds-api.com/v4/sports/"soccer_epl,soccer_germany_bundesliga,soccer_spain_la_liga,soccer_italy_serie_a"/odds/"
+        url = "https://api.the-odds-api.com/v4/sports/soccer_epl,soccer_germany_bundesliga,soccer_spain_la_liga,soccer_italy_serie_a/odds/"
         params = {
             "apiKey": ODDS_API_KEY,
             "regions": "eu",
