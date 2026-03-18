@@ -1,169 +1,171 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-from scipy.stats import poisson
+import requests
+from datetime import datetime
 
-st.set_page_config(layout="wide")
+# ==============================
+# API KEYS
+# ==============================
+FOOTBALL_API_KEY = "87d5fc28e1e84206b1e48312563372b7"
+ODDS_API_KEY = "62f668f1e4a69303cf9b75e0f3cf3452"
 
-st.title("🔥 REAL AI BETTING SYSTEM")
+# ==============================
+# LOAD HISTORICAL DATA (TRAIN)
+# ==============================
+@st.cache_data
+def load_data():
+    urls = [
+        "https://www.football-data.co.uk/mmz4281/2324/E0.csv",
+        "https://www.football-data.co.uk/mmz4281/2324/D1.csv",
+        "https://www.football-data.co.uk/mmz4281/2324/I1.csv"
+    ]
+    df_list = [pd.read_csv(url) for url in urls]
+    df = pd.concat(df_list)
+    return df
 
-# ------------------------
-# SESSION
-# ------------------------
-if "bets" not in st.session_state:
-    st.session_state.bets = []
+# ==============================
+# TRAIN MODEL (VERY SIMPLE)
+# ==============================
+def train_model(df):
+    df = df.dropna(subset=["FTHG", "FTAG"])
 
-# ------------------------
-# DATA (VALÓDI)
-# ------------------------
-url = "https://www.football-data.co.uk/mmz4281/2324/E0.csv"
+    teams = {}
 
-df = pd.read_csv(url)
+    for _, row in df.iterrows():
+        home = row["HomeTeam"]
+        away = row["AwayTeam"]
 
-df = df.dropna(subset=["FTHG","FTAG","HomeTeam","AwayTeam","B365H","B365D","B365A"])
+        if home not in teams:
+            teams[home] = {"scored": 0, "conceded": 0, "games": 0}
+        if away not in teams:
+            teams[away] = {"scored": 0, "conceded": 0, "games": 0}
 
-# ------------------------
-# ÁTLAG GÓLOK
-# ------------------------
-avg_home_goals = df["FTHG"].mean()
-avg_away_goals = df["FTAG"].mean()
+        teams[home]["scored"] += row["FTHG"]
+        teams[home]["conceded"] += row["FTAG"]
+        teams[home]["games"] += 1
 
-# ------------------------
-# CSAPAT STATOK
-# ------------------------
-teams = pd.concat([df["HomeTeam"], df["AwayTeam"]]).unique()
+        teams[away]["scored"] += row["FTAG"]
+        teams[away]["conceded"] += row["FTHG"]
+        teams[away]["games"] += 1
 
-attack_strength = {}
-defense_strength = {}
+    return teams
 
-for team in teams:
+# ==============================
+# GET FIXTURES (UPCOMING MATCHES)
+# ==============================
+def get_fixtures():
+    url = "https://api.football-data.org/v4/matches"
+    headers = {"X-Auth-Token": FOOTBALL_API_KEY}
 
-    home = df[df["HomeTeam"] == team]
-    away = df[df["AwayTeam"] == team]
+    params = {
+        "status": "SCHEDULED"
+    }
 
-    attack = (home["FTHG"].mean() + away["FTAG"].mean()) / 2
-    defense = (home["FTAG"].mean() + away["FTHG"].mean()) / 2
+    res = requests.get(url, headers=headers, params=params)
+    data = res.json()
 
-    attack_strength[team] = attack / avg_home_goals
-    defense_strength[team] = defense / avg_away_goals
+    matches = []
 
-# ------------------------
-# ELŐREJELZÉS
-# ------------------------
-def predict(home, away):
+    for m in data["matches"]:
+        matches.append({
+            "home": m["homeTeam"]["name"],
+            "away": m["awayTeam"]["name"],
+            "date": m["utcDate"]
+        })
 
-    home_xg = attack_strength[home] * defense_strength[away] * avg_home_goals
-    away_xg = attack_strength[away] * defense_strength[home] * avg_away_goals
+    return matches
 
-    max_goals = 5
+# ==============================
+# GET ODDS
+# ==============================
+def get_odds():
+    url = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds/"
+    
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "eu",
+        "markets": "h2h"
+    }
 
-    home_win = 0
-    draw = 0
-    away_win = 0
+    res = requests.get(url, params=params)
+    data = res.json()
 
-    for i in range(max_goals):
-        for j in range(max_goals):
+    odds_dict = {}
 
-            prob = poisson.pmf(i, home_xg) * poisson.pmf(j, away_xg)
+    for game in data:
+        home = game["home_team"]
+        away = game["away_team"]
 
-            if i > j:
-                home_win += prob
-            elif i == j:
-                draw += prob
-            else:
-                away_win += prob
+        try:
+            outcomes = game["bookmakers"][0]["markets"][0]["outcomes"]
+            odds_dict[(home, away)] = {
+                outcomes[0]["name"]: outcomes[0]["price"],
+                outcomes[1]["name"]: outcomes[1]["price"]
+            }
+        except:
+            continue
 
-    return home_win, draw, away_win
+    return odds_dict
 
-# ------------------------
-# MAI MECCSEK (szimulált = utolsó sorok)
-# ------------------------
-matches = df.tail(20)
+# ==============================
+# PREDICT
+# ==============================
+def predict(home, away, teams):
+    if home not in teams or away not in teams:
+        return None
 
-results = []
+    h = teams[home]
+    a = teams[away]
 
-for i, r in matches.iterrows():
+    home_strength = h["scored"] / h["games"]
+    away_strength = a["scored"] / a["games"]
 
-    home = r["HomeTeam"]
-    away = r["AwayTeam"]
+    total = home_strength + away_strength
 
-    home_p, draw_p, away_p = predict(home, away)
+    home_prob = home_strength / total
+    away_prob = away_strength / total
 
-    home_odds = r["B365H"]
-    draw_odds = r["B365D"]
-    away_odds = r["B365A"]
+    return home_prob, away_prob
 
-    home_value = (home_p * home_odds) - 1
-    away_value = (away_p * away_odds) - 1
+# ==============================
+# STREAMLIT UI
+# ==============================
+st.title("🔥 BETTING SYSTEM (LIVE AI)")
 
-    results.append({
-        "Match": f"{home} vs {away}",
-        "Home %": home_p,
-        "Draw %": draw_p,
-        "Away %": away_p,
-        "Home odds": home_odds,
-        "Away odds": away_odds,
-        "Home value": home_value,
-        "Away value": away_value
-    })
+df = load_data()
+teams = train_model(df)
 
-df_pred = pd.DataFrame(results)
+fixtures = get_fixtures()
+odds = get_odds()
 
-# ------------------------
-# FILTER
-# ------------------------
-filtered = df_pred[
-    (df_pred["Home value"] > 0.05) |
-    (df_pred["Away value"] > 0.05)
-]
+for match in fixtures:
+    home = match["home"]
+    away = match["away"]
 
-st.subheader("🔥 VALUE TIPPEK (REAL AI)")
+    if (home, away) not in odds:
+        continue
 
-if filtered.empty:
-    st.warning("Nincs value")
-else:
-    for i, row in filtered.iterrows():
+    probs = predict(home, away, teams)
+    if not probs:
+        continue
 
-        st.write(row["Match"])
+    home_prob, away_prob = probs
 
-        st.write(f"Home %: {round(row['Home %'],2)} | Away %: {round(row['Away %'],2)}")
+    home_odds = odds[(home, away)].get(home)
+    away_odds = odds[(home, away)].get(away)
 
-        st.write(f"Home value: {round(row['Home value'],2)} | Away value: {round(row['Away value'],2)}")
+    if not home_odds or not away_odds:
+        continue
 
-        stake = 1000 * max(row["Home value"], row["Away value"])
+    home_value = home_prob * home_odds - 1
+    away_value = away_prob * away_odds - 1
 
-        st.write(f"Stake: {round(stake,2)}")
+    if home_value > 0.07 or away_value > 0.07:
+        st.subheader(f"{home} vs {away}")
+        st.write(f"Home %: {round(home_prob,2)} | Away %: {round(away_prob,2)}")
+        st.write(f"Home value: {round(home_value,2)} | Away value: {round(away_value,2)}")
 
-        if st.button(f"Fogadás {row['Match']}", key=f"bet_{i}"):
-
-            side = "HOME" if row["Home value"] > row["Away value"] else "AWAY"
-            odds = row["Home odds"] if side=="HOME" else row["Away odds"]
-
-            st.session_state.bets.append({
-                "match": row["Match"],
-                "side": side,
-                "odds": odds,
-                "stake": stake
-            })
-
-# ------------------------
-# CLV TRACKING
-# ------------------------
-st.subheader("📉 CLV")
-
-for i, bet in enumerate(st.session_state.bets):
-
-    st.write(f"{bet['match']} @ {bet['odds']}")
-
-    closing = st.number_input(f"Closing odds {i}", key=f"clv_{i}")
-
-    if closing > 0:
-
-        clv = bet["odds"] - closing
-
-        st.write(f"CLV: {round(clv,2)}")
-
-        if clv > 0:
-            st.success("✅ GOOD")
+        if home_value > away_value:
+            st.success(f"👉 TIPP: {home}")
         else:
-            st.error("❌ BAD")
+            st.success(f"👉 TIPP: {away}")
